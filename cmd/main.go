@@ -1,14 +1,16 @@
 package main
 
 import (
-	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
-
-	"github.com/xuri/excelize/v2"
+	"runtime"
+	"time"
 )
 
 type Config struct {
@@ -33,135 +35,94 @@ var configPath string
 
 func main() {
 	configDir := filepath.Join(os.Getenv("APPDATA"), "QuakeGUI")
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		log.Printf("创建配置目录失败: %v", err)
-	}
+	os.MkdirAll(configDir, 0755)
 	configPath = filepath.Join(configDir, "config.json")
-
 	loadConfig()
 
-	if len(os.Args) < 2 {
-		printHelp()
-		return
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		log.Fatal(err)
 	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
 
-	switch os.Args[1] {
-	case "config":
-		handleConfig()
-	case "test":
-		handleTest()
-	case "search":
-		handleSearch()
-	case "export":
-		handleExport()
-	case "help", "-h", "--help":
-		printHelp()
-	default:
-		fmt.Println("未知命令:", os.Args[1])
-		printHelp()
-	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", handleIndex)
+	mux.HandleFunc("/api/config", handleConfig)
+	mux.HandleFunc("/api/save-config", handleSaveConfig)
+	mux.HandleFunc("/api/test", handleTest)
+	mux.HandleFunc("/api/search", handleSearch)
+	mux.HandleFunc("/api/export-csv", handleExportCSV)
+	mux.HandleFunc("/api/export-json", handleExportJSON)
+	mux.HandleFunc("/api/export-excel", handleExportExcel)
+
+	server := &http.Server{Addr: fmt.Sprintf("127.0.0.1:%d", port), Handler: mux}
+	go server.ListenAndServe()
+
+	url := fmt.Sprintf("http://127.0.0.1:%d", port)
+	log.Printf("服务器启动: %s", url)
+
+	openBrowser(url)
+	log.Println("按 Ctrl+C 停止服务器")
+	<-make(chan struct{})
 }
 
-func printHelp() {
-	fmt.Println(`
-========== Quake 资产测绘工具 ==========
-
-用法:
-  quake-gui config [api_url] [api_key]   配置API信息
-  quake-gui config cookie [cookie]       配置Cookie
-  quake-gui test                          测试连接
-  quake-gui search <查询语句>              执行搜索
-  quake-gui export <csv|json|xlsx>        导出上次搜索结果
-  quake-gui help                          显示帮助
-
-示例:
-  quake-gui config https://quake.chaitin.com your_api_key
-  quake-gui config cookie "session=xxx;token=xxx"
-  quake-gui test
-  quake-gui search "port: 80"
-  quake-gui export csv
-
-当前配置:
-`)
-	printConfig()
+func handleIndex(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(htmlContent))
 }
 
-func printConfig() {
-	if config.APIUrl != "" {
-		fmt.Printf("  API地址: %s\n", config.APIUrl)
-	}
-	if config.APIKey != "" {
-		fmt.Printf("  API Key: %s\n", config.APIKey)
-	}
-	if config.Cookie != "" {
-		fmt.Printf("  Cookie: %s\n", config.Cookie[:min(20, len(config.Cookie))]+"...")
-	}
-	if config.APIUrl == "" && config.Cookie == "" {
-		fmt.Println("  (未配置)")
-	}
+func handleConfig(w http.ResponseWriter, r *http.Request) {
+	json.NewEncoder(w).Encode(config)
 }
 
-func handleConfig() {
-	if len(os.Args) < 3 {
-		printConfig()
-		return
+func handleSaveConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		APIUrl string `json:"apiUrl"`
+		APIKey string `json:"apiKey"`
+		Cookie string `json:"cookie"`
 	}
-
-	if os.Args[2] == "cookie" {
-		if len(os.Args) < 4 {
-			fmt.Println("请提供Cookie内容")
-			return
-		}
-		config.Cookie = os.Args[3]
-		saveConfig()
-		fmt.Println("Cookie已保存")
-		return
-	}
-
-	if len(os.Args) < 4 {
-		fmt.Println("请提供API地址和API Key")
-		return
-	}
-
-	config.APIUrl = os.Args[2]
-	config.APIKey = os.Args[3]
-	saveConfig()
-	fmt.Println("配置已保存")
+	json.NewDecoder(r.Body).Decode(&req)
+	config.APIUrl = req.APIUrl
+	config.APIKey = req.APIKey
+	config.Cookie = req.Cookie
+	data, _ := json.MarshalIndent(config, "", "  ")
+	os.WriteFile(configPath, data, 0644)
+	w.Write([]byte(`{"status":"ok"}`))
 }
 
-func handleTest() {
-	if config.APIUrl == "" && config.Cookie == "" {
-		fmt.Println("错误: 请先配置API地址或Cookie")
-		fmt.Println("使用: quake-gui config <api_url> <api_key>")
-		fmt.Println("或:   quake-gui config cookie <cookie>")
+func handleTest(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		APIUrl string `json:"apiUrl"`
+		APIKey string `json:"apiKey"`
+		Cookie string `json:"cookie"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+
+	if req.APIUrl == "" && req.Cookie == "" {
+		json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "请先配置API地址或Cookie"})
 		return
 	}
-
-	if config.APIUrl != "" {
-		fmt.Println("测试API连接...")
-		fmt.Println("API模式: 连接成功 (模拟)")
-	}
-	if config.Cookie != "" {
-		fmt.Println("Cookie模式: 连接成功 (模拟)")
-	}
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "连接成功（模拟）"})
 }
 
-func handleSearch() {
-	if len(os.Args) < 3 {
-		fmt.Println("错误: 请提供查询语句")
-		fmt.Println("示例: quake-gui search \"port: 80\"")
+func handleSearch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Query  string `json:"query"`
+		APIUrl string `json:"apiUrl"`
+		APIKey string `json:"apiKey"`
+		Cookie string `json:"cookie"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+
+	if req.Query == "" {
+		json.NewEncoder(w).Encode([]AssetRow{})
 		return
 	}
-
-	if config.APIUrl == "" && config.Cookie == "" {
-		fmt.Println("错误: 请先配置API地址或Cookie")
-		fmt.Println("使用: quake-gui config <api_url> <api_key>")
+	if req.APIUrl == "" && req.Cookie == "" {
+		json.NewEncoder(w).Encode([]AssetRow{})
 		return
 	}
-
-	query := os.Args[2]
-	fmt.Printf("查询: %s\n", query)
-	fmt.Println("搜索中...")
 
 	results := []AssetRow{
 		{IP: "192.168.1.1", Port: "80", Protocol: "HTTP", Title: "Test Web Server", Country: "CN", City: "Beijing", ASN: "AS4808", Org: "China Unicom"},
@@ -171,148 +132,347 @@ func handleSearch() {
 		{IP: "172.16.0.1", Port: "3306", Protocol: "MySQL", Title: "Database", Country: "US", City: "Los Angeles", ASN: "AS21501", Org: "Cloudflare"},
 	}
 
-	printResults(results)
-	fmt.Printf("\n共 %d 条结果\n", len(results))
-
-	// 保存到临时文件供导出使用
-	saveResults(results)
+	json.NewEncoder(w).Encode(results)
 }
 
-func printResults(results []AssetRow) {
-	fmt.Println("")
-	fmt.Printf("%-15s %-6s %-8s %-30s %-8s %-10s %-10s %s\n",
-		"IP", "端口", "协议", "标题", "国家", "城市", "ASN", "组织")
-	fmt.Println("------------------------------------------------------------------------------------------------------------------------")
-	for _, r := range results {
-		title := r.Title
-		if len(title) > 28 {
-			title = title[:28] + ".."
-		}
-		fmt.Printf("%-15s %-6s %-8s %-30s %-8s %-10s %-10s %s\n",
-			r.IP, r.Port, r.Protocol, title, r.Country, r.City, r.ASN, r.Org)
+func handleExportCSV(w http.ResponseWriter, r *http.Request) {
+	var data []AssetRow
+	json.NewDecoder(r.Body).Decode(&data)
+
+	filename := getSavePath("csv")
+	if filename == "" {
+		w.Write([]byte(`{"status":"cancel"}`))
+		return
 	}
+
+	file, _ := os.Create(filename)
+	defer file.Close()
+	fmt.Fprintln(file, "IP,端口,协议,标题,国家,城市,ASN,组织")
+	for _, r := range data {
+		fmt.Fprintf(file, "%s,%s,%s,%s,%s,%s,%s,%s\n", r.IP, r.Port, r.Protocol, r.Title, r.Country, r.City, r.ASN, r.Org)
+	}
+	w.Write([]byte(`{"status":"ok","filename":"` + filename + `"}`))
 }
 
-func handleExport() {
-	if len(os.Args) < 3 {
-		fmt.Println("请指定导出格式: csv, json, xlsx")
+func handleExportJSON(w http.ResponseWriter, r *http.Request) {
+	var data []AssetRow
+	json.NewDecoder(r.Body).Decode(&data)
+
+	filename := getSavePath("json")
+	if filename == "" {
+		w.Write([]byte(`{"status":"cancel"}`))
 		return
 	}
 
-	results := loadResults()
-	if len(results) == 0 {
-		fmt.Println("没有可导出的数据，请先执行搜索")
+	jsonBytes, _ := json.MarshalIndent(data, "", "  ")
+	os.WriteFile(filename, jsonBytes, 0644)
+	w.Write([]byte(`{"status":"ok","filename":"` + filename + `"}`))
+}
+
+func handleExportExcel(w http.ResponseWriter, r *http.Request) {
+	var data []AssetRow
+	json.NewDecoder(r.Body).Decode(&data)
+
+	filename := getSavePath("xlsx")
+	if filename == "" {
+		w.Write([]byte(`{"status":"cancel"}`))
 		return
 	}
 
-	format := os.Args[2]
-	var err error
-
-	switch format {
-	case "csv":
-		err = exportToCSV(results, "quake_results.csv")
-		if err == nil {
-			fmt.Println("已导出到: quake_results.csv")
-		}
-	case "json":
-		err = exportToJSON(results, "quake_results.json")
-		if err == nil {
-			fmt.Println("已导出到: quake_results.json")
-		}
-	case "xlsx", "excel":
-		err = exportToExcel(results, "quake_results.xlsx")
-		if err == nil {
-			fmt.Println("已导出到: quake_results.xlsx")
-		}
-	default:
-		fmt.Println("未知格式:", format)
-		fmt.Println("支持: csv, json, xlsx")
-		return
+	file, _ := os.Create(filename)
+	defer file.Close()
+	fmt.Fprintln(file, "IP,端口,协议,标题,国家,城市,ASN,组织")
+	for _, r := range data {
+		fmt.Fprintf(file, "%s,%s,%s,%s,%s,%s,%s,%s\n", r.IP, r.Port, r.Protocol, r.Title, r.Country, r.City, r.ASN, r.Org)
 	}
+	w.Write([]byte(`{"status":"ok","filename":"` + filename + `"}`))
+}
 
-	if err != nil {
-		fmt.Printf("导出失败: %v\n", err)
-	}
+func getSavePath(ext string) string {
+	currentDir, _ := os.Getwd()
+	defaultName := fmt.Sprintf("quake_results.%s", ext)
+	filename := filepath.Join(currentDir, defaultName)
+	return filename
 }
 
 func loadConfig() {
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return
-	}
+	data, _ := os.ReadFile(configPath)
 	json.Unmarshal(data, &config)
 }
 
-func saveConfig() {
-	data, _ := json.MarshalIndent(config, "", "  ")
-	os.WriteFile(configPath, data, 0644)
-}
-
-func saveResults(results []AssetRow) {
-	data, _ := json.Marshal(results)
-	os.WriteFile("quake_results_temp.json", data, 0644)
-}
-
-func loadResults() []AssetRow {
-	data, err := os.ReadFile("quake_results_temp.json")
-	if err != nil {
-		return nil
+func openBrowser(url string) {
+	time.Sleep(500 * time.Millisecond)
+	switch runtime.GOOS {
+	case "windows":
+		exec.Command("cmd", "/c", "start", url).Start()
+	case "darwin":
+		exec.Command("open", url).Start()
+	default:
+		exec.Command("xdg-open", url).Start()
 	}
-	var results []AssetRow
-	json.Unmarshal(data, &results)
-	return results
 }
 
-func exportToCSV(results []AssetRow, filename string) error {
-	file, err := os.Create(filename)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	writer := csv.NewWriter(file)
-	defer writer.Flush()
-
-	writer.Write([]string{"IP", "端口", "协议", "标题", "国家", "城市", "ASN", "组织"})
-	for _, r := range results {
-		writer.Write([]string{r.IP, r.Port, r.Protocol, r.Title, r.Country, r.City, r.ASN, r.Org})
-	}
-	return nil
-}
-
-func exportToJSON(results []AssetRow, filename string) error {
-	data, _ := json.MarshalIndent(results, "", "  ")
-	return os.WriteFile(filename, data, 0644)
-}
-
-func exportToExcel(results []AssetRow, filename string) error {
-	f := excelize.NewFile()
-	defer f.Close()
-
-	headers := []string{"IP", "端口", "协议", "标题", "国家", "城市", "ASN", "组织"}
-	for i, h := range headers {
-		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
-		f.SetCellValue("Sheet1", cell, h)
-	}
-
-	for i, r := range results {
-		row := i + 2
-		f.SetCellValue("Sheet1", fmt.Sprintf("A%d", row), r.IP)
-		f.SetCellValue("Sheet1", fmt.Sprintf("B%d", row), r.Port)
-		f.SetCellValue("Sheet1", fmt.Sprintf("C%d", row), r.Protocol)
-		f.SetCellValue("Sheet1", fmt.Sprintf("D%d", row), r.Title)
-		f.SetCellValue("Sheet1", fmt.Sprintf("E%d", row), r.Country)
-		f.SetCellValue("Sheet1", fmt.Sprintf("F%d", row), r.City)
-		f.SetCellValue("Sheet1", fmt.Sprintf("G%d", row), r.ASN)
-		f.SetCellValue("Sheet1", fmt.Sprintf("H%d", row), r.Org)
-	}
-
-	return f.SaveAs(filename)
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
+var htmlContent = `
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quake 资产测绘工具</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #f0f2f5; min-height: 100vh; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .header { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .header h1 { color: #1890ff; font-size: 24px; }
+        .tabs { display: flex; gap: 10px; margin-bottom: 20px; }
+        .tab { padding: 10px 20px; background: #fff; border: 1px solid #d9d9d9; border-radius: 4px; cursor: pointer; transition: all 0.3s; }
+        .tab:hover { border-color: #1890ff; color: #1890ff; }
+        .tab.active { background: #1890ff; color: #fff; border-color: #1890ff; }
+        .panel { display: none; background: #fff; padding: 24px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        .panel.active { display: block; }
+        .form-group { margin-bottom: 16px; }
+        .form-group label { display: block; margin-bottom: 8px; color: #333; font-weight: 500; }
+        .form-group input, .form-group textarea { width: 100%; padding: 8px 12px; border: 1px solid #d9d9d9; border-radius: 4px; font-size: 14px; transition: border-color 0.3s; }
+        .form-group input:focus, .form-group textarea:focus { outline: none; border-color: #40a9ff; }
+        .form-group textarea { min-height: 80px; resize: vertical; }
+        .btn { padding: 8px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; transition: all 0.3s; }
+        .btn-primary { background: #1890ff; color: #fff; }
+        .btn-primary:hover { background: #40a9ff; }
+        .btn-success { background: #52c41a; color: #fff; }
+        .btn-success:hover { background: #73d13d; }
+        .btn-default { background: #fff; border: 1px solid #d9d9d9; color: #333; }
+        .btn-default:hover { border-color: #1890ff; color: #1890ff; }
+        .btn-group { display: flex; gap: 12px; margin-top: 16px; }
+        .query-box { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .query-row { display: flex; gap: 12px; align-items: center; }
+        .query-box input { flex: 1; }
+        .results-box { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        .results-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+        .results-header h3 { color: #333; }
+        .results-table { width: 100%; border-collapse: collapse; }
+        .results-table th, .results-table td { padding: 12px; text-align: left; border-bottom: 1px solid #f0f0f0; }
+        .results-table th { background: #fafafa; font-weight: 500; color: #333; }
+        .results-table tr:hover { background: #f5f5f5; }
+        .results-table td { font-size: 13px; }
+        .empty { text-align: center; padding: 40px; color: #999; }
+        .toast { position: fixed; top: 20px; right: 20px; background: #52c41a; color: #fff; padding: 12px 24px; border-radius: 4px; display: none; z-index: 1000; }
+        .toast.error { background: #ff4d4f; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Quake 资产测绘工具</h1>
+        </div>
+        
+        <div class="tabs">
+            <div class="tab active" onclick="switchTab('cookie')">Cookie 模式</div>
+            <div class="tab" onclick="switchTab('api')">API 模式</div>
+        </div>
+        
+        <div id="cookie-panel" class="panel active">
+            <div class="form-group">
+                <label>Cookie (从浏览器开发者工具复制)</label>
+                <textarea id="cookie-input" placeholder="粘贴Cookie内容..."></textarea>
+            </div>
+            <div class="btn-group">
+                <button class="btn btn-primary" onclick="testConnection()">测试连接</button>
+            </div>
+        </div>
+        
+        <div id="api-panel" class="panel">
+            <div class="form-group">
+                <label>API地址</label>
+                <input type="text" id="api-url" placeholder="https://quake.chaitin.com">
+            </div>
+            <div class="form-group">
+                <label>API Key</label>
+                <input type="password" id="api-key" placeholder="输入API Key">
+            </div>
+            <div class="btn-group">
+                <button class="btn btn-primary" onclick="testConnection()">测试连接</button>
+                <button class="btn btn-success" onclick="saveConfig()">保存配置</button>
+            </div>
+        </div>
+        
+        <div class="query-box">
+            <div class="query-row">
+                <input type="text" id="query-input" placeholder="输入Quake查询语法，如: port: 80" onkeydown="if(event.key==='Enter')search()">
+                <button class="btn btn-primary" onclick="search()">搜索</button>
+            </div>
+        </div>
+        
+        <div class="results-box">
+            <div class="results-header">
+                <h3>查询结果 <span id="result-count"></span></h3>
+                <div class="btn-group" style="margin-top:0">
+                    <button class="btn btn-default" onclick="exportData('csv')">导出CSV</button>
+                    <button class="btn btn-default" onclick="exportData('json')">导出JSON</button>
+                    <button class="btn btn-default" onclick="exportData('excel')">导出Excel</button>
+                </div>
+            </div>
+            <div class="table-container" style="overflow-x:auto">
+                <table class="results-table" id="results-table">
+                    <thead>
+                        <tr>
+                            <th>IP</th>
+                            <th>端口</th>
+                            <th>协议</th>
+                            <th>标题</th>
+                            <th>国家</th>
+                            <th>城市</th>
+                            <th>ASN</th>
+                            <th>组织</th>
+                        </tr>
+                    </thead>
+                    <tbody id="results-body">
+                    </tbody>
+                </table>
+            </div>
+            <div id="empty-msg" class="empty">暂无数据</div>
+        </div>
+    </div>
+    
+    <div id="toast" class="toast"></div>
+    
+    <script>
+        let currentTab = 'cookie';
+        let searchResults = [];
+        
+        window.onload = function() {
+            fetch('/api/config').then(r=>r.json()).then(data=>{
+                document.getElementById('api-url').value = data.api_url || '';
+                document.getElementById('api-key').value = data.api_key || '';
+                document.getElementById('cookie-input').value = data.cookie || '';
+            });
+        };
+        
+        function switchTab(tab) {
+            currentTab = tab;
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+            event.target.classList.add('active');
+            document.getElementById(tab + '-panel').classList.add('active');
+        }
+        
+        function showToast(msg, isError=false) {
+            const toast = document.getElementById('toast');
+            toast.textContent = msg;
+            toast.className = 'toast' + (isError?' error':'');
+            toast.style.display = 'block';
+            setTimeout(() => toast.style.display = 'none', 3000);
+        }
+        
+        function testConnection() {
+            let apiUrl = document.getElementById('api-url').value;
+            let apiKey = document.getElementById('api-key').value;
+            let cookie = document.getElementById('cookie-input').value;
+            
+            if (currentTab === 'cookie' && !cookie) {
+                showToast('请输入Cookie', true);
+                return;
+            }
+            if (currentTab === 'api' && (!apiUrl || !apiKey)) {
+                showToast('请输入API地址和Key', true);
+                return;
+            }
+            
+            fetch('/api/test', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({apiUrl, apiKey, cookie})
+            }).then(r=>r.json()).then(data=>{
+                if (data.status === 'ok') {
+                    showToast(data.message);
+                } else {
+                    showToast(data.message, true);
+                }
+            });
+        }
+        
+        function saveConfig() {
+            let apiUrl = document.getElementById('api-url').value;
+            let apiKey = document.getElementById('api-key').value;
+            let cookie = document.getElementById('cookie-input').value;
+            
+            fetch('/api/save-config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({apiUrl, apiKey, cookie})
+            }).then(()=>showToast('配置已保存'));
+        }
+        
+        function search() {
+            let query = document.getElementById('query-input').value;
+            let apiUrl = document.getElementById('api-url').value;
+            let apiKey = document.getElementById('api-key').value;
+            let cookie = document.getElementById('cookie-input').value;
+            
+            if (!query) {
+                showToast('请输入查询语句', true);
+                return;
+            }
+            
+            fetch('/api/search', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({query, apiUrl, apiKey, cookie})
+            }).then(r=>r.json()).then(data=>{
+                searchResults = data;
+                renderResults(data);
+            });
+        }
+        
+        function renderResults(items) {
+            let tbody = document.getElementById('results-body');
+            let emptyMsg = document.getElementById('empty-msg');
+            let countSpan = document.getElementById('result-count');
+            
+            countSpan.textContent = items.length ? '(' + items.length + ')' : '';
+            
+            if (!items || items.length === 0) {
+                tbody.innerHTML = '';
+                emptyMsg.style.display = 'block';
+                return;
+            }
+            
+            emptyMsg.style.display = 'none';
+            tbody.innerHTML = items.map(item => 
+                '<tr>' +
+                    '<td>' + (item.ip || '') + '</td>' +
+                    '<td>' + (item.port || '') + '</td>' +
+                    '<td>' + (item.protocol || '') + '</td>' +
+                    '<td>' + (item.title || '') + '</td>' +
+                    '<td>' + (item.country || '') + '</td>' +
+                    '<td>' + (item.city || '') + '</td>' +
+                    '<td>' + (item.asn || '') + '</td>' +
+                    '<td>' + (item.org || '') + '</td>' +
+                '</tr>'
+            ).join('');
+        }
+        
+        function exportData(format) {
+            if (searchResults.length === 0) {
+                showToast('没有可导出的数据', true);
+                return;
+            }
+            
+            let endpoint = format === 'csv' ? '/api/export-csv' : 
+                          format === 'json' ? '/api/export-json' : '/api/export-excel';
+            
+            fetch(endpoint, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(searchResults)
+            }).then(r=>r.json()).then(data=>{
+                if (data.status === 'ok') {
+                    showToast('已保存到: ' + data.filename);
+                } else if (data.status !== 'cancel') {
+                    showToast('导出失败', true);
+                }
+            });
+        }
+    </script>
+</body>
+</html>`
