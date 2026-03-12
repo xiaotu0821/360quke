@@ -1,6 +1,0 @@
-IP,端口,协议,标题,国家,城市,ASN,组织
-192.168.1.1,80,HTTP,Test Web Server,CN,Beijing,AS4808,China Unicom
-192.168.1.2,443,HTTPS,Nginx Server,CN,Shanghai,AS4134,China Telecom
-192.168.1.3,22,SSH,SSH Service,US,New York,AS7922,Comcast
-10.0.0.1,3389,RDP,Windows RDP,CN,Guangzhou,AS58453,China Mobile
-172.16.0.1,3306,MySQL,Database,US,Los Angeles,AS21501,Cloudflare
