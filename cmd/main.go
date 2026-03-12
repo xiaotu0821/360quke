@@ -31,7 +31,7 @@ type AssetRow struct {
 
 var config Config
 var configPath string
-var currentMode int
+var results []AssetRow
 
 func main() {
 	configDir := filepath.Join(os.Getenv("APPDATA"), "QuakeGUI")
@@ -44,109 +44,158 @@ func main() {
 
 	app := tview.NewApplication()
 
-	cookieInput := tview.NewInputField()
-	cookieInput.SetPlaceholder("请输入Cookie...")
+	// 顶部标题
+	title := tview.NewTextView()
+	title.SetText(" ========== Quake 资产测绘工具 ========== ")
+	title.SetTextAlign(tview.AlignCenter)
+	title.SetTextColor(tcell.ColorGreen)
 
+	// 模式选择
+	cookieBtn := tview.NewButton(" [1] Cookie模式 ")
+	apiBtn := tview.NewButton(" [2] API模式 ")
+
+	// Cookie输入
+	cookieLabel := tview.NewTextView()
+	cookieLabel.SetText(" Cookie: ")
+	cookieInput := tview.NewInputField()
+	cookieInput.SetPlaceholder("粘贴Cookie...")
+
+	// API输入
+	apiLabel := tview.NewTextView()
+	apiLabel.SetText(" API地址: ")
 	apiUrlInput := tview.NewInputField()
 	apiUrlInput.SetPlaceholder("https://quake.chaitin.com")
 	apiUrlInput.SetText(config.APIUrl)
 
+	apiKeyLabel := tview.NewTextView()
+	apiKeyLabel.SetText(" API Key: ")
 	apiKeyInput := tview.NewInputField()
 	apiKeyInput.SetPlaceholder("输入API Key")
 	apiKeyInput.SetText(config.APIKey)
+	apiKeyInput.SetMaskCharacter('*')
 
-	cookiePanel := tview.NewFlex().SetDirection(tview.FlexRow)
-	cookiePanel.AddItem(tview.NewTextView().SetText("Cookie设置:"), 1, 0, false)
-	cookiePanel.AddItem(cookieInput, 3, 0, false)
+	// 功能按钮
+	testBtn := tview.NewButton(" [T] 测试连接 ")
+	saveBtn := tview.NewButton(" [S] 保存配置 ")
 
-	apiPanel := tview.NewFlex().SetDirection(tview.FlexRow)
-	apiPanel.AddItem(tview.NewTextView().SetText("API地址:"), 1, 0, false)
-	apiPanel.AddItem(apiUrlInput, 3, 0, false)
-	apiPanel.AddItem(tview.NewTextView().SetText("API Key:"), 1, 0, false)
-	apiPanel.AddItem(apiKeyInput, 3, 0, false)
-
-	pages := tview.NewPages()
-	pages.AddPage("cookie", cookiePanel, true, true)
-	pages.AddPage("api", apiPanel, true, false)
-
-	cookieModeBtn := tview.NewButton("[Cookie模式]")
-	cookieModeBtn.SetSelectedFunc(func() {
-		pages.SwitchToPage("cookie")
-		currentMode = 0
-	})
-	apiModeBtn := tview.NewButton("[API模式]")
-	apiModeBtn.SetSelectedFunc(func() {
-		pages.SwitchToPage("api")
-		currentMode = 1
-	})
-
-	modePanel := tview.NewFlex()
-	modePanel.AddItem(cookieModeBtn, 0, 1, false)
-	modePanel.AddItem(apiModeBtn, 0, 1, false)
-
+	// 查询
+	queryLabel := tview.NewTextView()
+	queryLabel.SetText(" 查询语句: ")
 	queryInput := tview.NewInputField()
-	queryInput.SetPlaceholder("输入Quake查询语法")
+	queryInput.SetPlaceholder("输入Quake查询语法，如: port: 80")
+	searchBtn := tview.NewButton(" [回车] 搜索 ")
 
-	results := []AssetRow{}
-
-	resultTable := tview.NewTable().
-		SetSelectable(true, false)
+	// 结果表格
+	resultTable := tview.NewTable()
+	resultTable.SetBorder(true).SetTitle("查询结果")
 
 	headers := []string{"IP", "端口", "协议", "标题", "国家", "城市", "ASN", "组织"}
 	for col, header := range headers {
-		tableCell := tview.NewTableCell(header).
+		cell := tview.NewTableCell(header).
 			SetTextColor(tcell.ColorYellow).
-			SetAlign(tview.AlignCenter)
-		resultTable.SetCell(0, col, tableCell)
+			SetAlign(tview.AlignCenter).
+			SetSelectable(false)
+		resultTable.SetCell(0, col, cell)
 	}
+	resultTable.SetSelectable(true, false)
 
-	statusText := tview.NewTextView()
-	statusText.SetDynamicColors(true)
-	statusText.SetText("[yellow]总计: 0[white]")
+	// 导出按钮
+	exportCSVBtn := tview.NewButton(" [C] 导出CSV ")
+	exportJSONBtn := tview.NewButton(" [J] 导出JSON ")
+	exportExcelBtn := tview.NewButton(" [E] 导出Excel ")
 
-	mainFlex := tview.NewFlex().SetDirection(tview.FlexRow)
-	mainFlex.AddItem(tview.NewTextView().SetText("[yellow]Quake 资产测绘工具[white]").SetTextAlign(tview.AlignCenter), 1, 0, false)
-	mainFlex.AddItem(modePanel, 3, 0, false)
-	mainFlex.AddItem(pages, 12, 0, false)
+	// 状态栏
+	statusBar := tview.NewTextView()
+	statusBar.SetText(" 提示: 使用 Tab 切换焦点 | Esc 退出 ")
+	statusBar.SetTextColor(tcell.ColorDarkGray)
 
-	testConnBtn := tview.NewButton("[测试连接]")
-	testConnBtn.SetSelectedFunc(func() {
-		if currentMode == 0 {
+	// 切换模式
+	showAPI := false
+
+	cookieModeView := tview.NewFlex().SetDirection(tview.FlexRow)
+	cookieModeView.AddItem(cookieLabel, 1, 0, false)
+	cookieModeView.AddItem(cookieInput, 1, 0, true)
+
+	apiModeView := tview.NewFlex().SetDirection(tview.FlexRow)
+	apiModeView.AddItem(apiLabel, 1, 0, false)
+	apiModeView.AddItem(apiUrlInput, 1, 0, true)
+	apiModeView.AddItem(apiKeyLabel, 1, 0, false)
+	apiModeView.AddItem(apiKeyInput, 1, 0, true)
+
+	settingsView := tview.NewPages()
+	settingsView.AddPage("cookie", cookieModeView, true, true)
+	settingsView.AddPage("api", apiModeView, true, false)
+
+	// 按钮行
+	btnRow := tview.NewFlex()
+	btnRow.AddItem(cookieBtn, 0, 1, false)
+	btnRow.AddItem(apiBtn, 0, 1, false)
+	btnRow.AddItem(testBtn, 0, 1, false)
+	btnRow.AddItem(saveBtn, 0, 1, false)
+
+	// 查询行
+	queryRow := tview.NewFlex()
+	queryRow.AddItem(queryLabel, 10, 0, false)
+	queryRow.AddItem(queryInput, 0, 1, true)
+	queryRow.AddItem(searchBtn, 0, 1, false)
+
+	// 导出行
+	exportRow := tview.NewFlex()
+	exportRow.AddItem(exportCSVBtn, 0, 1, false)
+	exportRow.AddItem(exportJSONBtn, 0, 1, false)
+	exportRow.AddItem(exportExcelBtn, 0, 1, false)
+
+	// 主布局
+	mainView := tview.NewFlex().SetDirection(tview.FlexRow)
+	mainView.AddItem(title, 1, 0, false)
+	mainView.AddItem(btnRow, 1, 0, false)
+	mainView.AddItem(settingsView, 4, 0, false)
+	mainView.AddItem(queryRow, 1, 0, false)
+	mainView.AddItem(resultTable, 0, 1, true)
+	mainView.AddItem(exportRow, 1, 0, false)
+	mainView.AddItem(statusBar, 1, 0, false)
+
+	// 按钮事件
+	cookieBtn.SetSelectedFunc(func() {
+		settingsView.SwitchToPage("cookie")
+		showAPI = false
+		setStatus(statusBar, "当前模式: Cookie模式")
+	})
+
+	apiBtn.SetSelectedFunc(func() {
+		settingsView.SwitchToPage("api")
+		showAPI = true
+		setStatus(statusBar, "当前模式: API模式")
+	})
+
+	testBtn.SetSelectedFunc(func() {
+		if !showAPI {
 			if cookieInput.GetText() == "" {
-				statusText.SetText("[red]请输入Cookie[white]")
+				setStatus(statusBar, "错误: 请输入Cookie")
 				return
 			}
-			statusText.SetText("[green]Cookie模式连接成功![white]")
+			setStatus(statusBar, "Cookie模式: 连接成功(模拟)")
 		} else {
 			if apiUrlInput.GetText() == "" || apiKeyInput.GetText() == "" {
-				statusText.SetText("[red]请输入API地址和Key[white]")
+				setStatus(statusBar, "错误: 请输入API地址和Key")
 				return
 			}
-			statusText.SetText("[green]API连接成功![white]")
+			setStatus(statusBar, "API模式: 连接成功(模拟)")
 		}
 	})
 
-	saveBtn := tview.NewButton("[保存设置]")
 	saveBtn.SetSelectedFunc(func() {
 		config.APIUrl = apiUrlInput.GetText()
 		config.APIKey = apiKeyInput.GetText()
 		data, _ := json.Marshal(config)
 		os.WriteFile(configPath, data, 0644)
-		statusText.SetText("[green]设置已保存[white]")
+		setStatus(statusBar, "配置已保存到: "+configPath)
 	})
 
-	settingPanel := tview.NewFlex()
-	settingPanel.AddItem(testConnBtn, 0, 1, false)
-	settingPanel.AddItem(saveBtn, 0, 1, false)
-
-	mainFlex.AddItem(settingPanel, 3, 0, false)
-	mainFlex.AddItem(queryInput, 3, 0, false)
-
-	searchBtn := tview.NewButton("[搜索]")
 	searchBtn.SetSelectedFunc(func() {
 		query := queryInput.GetText()
 		if query == "" {
-			statusText.SetText("[red]请输入查询语句[white]")
+			setStatus(statusBar, "错误: 请输入查询语句")
 			return
 		}
 
@@ -154,21 +203,25 @@ func main() {
 		cookie := cookieInput.GetText()
 
 		if apiUrl == "" && cookie == "" {
-			statusText.SetText("[red]请先配置API地址或Cookie[white]")
+			setStatus(statusBar, "错误: 请先配置API地址或Cookie")
 			return
 		}
 
+		// 模拟搜索结果
 		results = []AssetRow{
-			{IP: "192.168.1.1", Port: "80", Protocol: "HTTP", Title: "Test Server", Country: "CN", City: "Beijing", ASN: "AS4808", Org: "China Unicom"},
-			{IP: "192.168.1.2", Port: "443", Protocol: "HTTPS", Title: "Web Server", Country: "CN", City: "Shanghai", ASN: "AS4134", Org: "China Telecom"},
+			{IP: "192.168.1.1", Port: "80", Protocol: "HTTP", Title: "Test Web Server", Country: "CN", City: "Beijing", ASN: "AS4808", Org: "China Unicom"},
+			{IP: "192.168.1.2", Port: "443", Protocol: "HTTPS", Title: "Nginx Server", Country: "CN", City: "Shanghai", ASN: "AS4134", Org: "China Telecom"},
 			{IP: "192.168.1.3", Port: "22", Protocol: "SSH", Title: "SSH Service", Country: "US", City: "New York", ASN: "AS7922", Org: "Comcast"},
-			{IP: "10.0.0.1", Port: "3389", Protocol: "RDP", Title: "RDP Service", Country: "CN", City: "Guangzhou", ASN: "AS58453", Org: "China Mobile"},
+			{IP: "10.0.0.1", Port: "3389", Protocol: "RDP", Title: "Windows RDP", Country: "CN", City: "Guangzhou", ASN: "AS58453", Org: "China Mobile"},
 			{IP: "172.16.0.1", Port: "3306", Protocol: "MySQL", Title: "Database", Country: "US", City: "Los Angeles", ASN: "AS21501", Org: "Cloudflare"},
 		}
 
+		// 清除旧数据
 		for row := resultTable.GetRowCount() - 1; row > 0; row-- {
 			resultTable.RemoveRow(row)
 		}
+
+		// 填充新数据
 		for i, asset := range results {
 			r := i + 1
 			cells := []string{asset.IP, asset.Port, asset.Protocol, asset.Title, asset.Country, asset.City, asset.ASN, asset.Org}
@@ -177,72 +230,61 @@ func main() {
 				resultTable.SetCell(r, col, cell)
 			}
 		}
-		statusText.SetText(fmt.Sprintf("[green]查询成功，共 %d 条结果[white]", len(results)))
+
+		setStatus(statusBar, fmt.Sprintf("查询成功，共 %d 条结果", len(results)))
 	})
 
-	searchPanel := tview.NewFlex()
-	searchPanel.AddItem(queryInput, 0, 1, false)
-	searchPanel.AddItem(searchBtn, 10, 0, false)
-
-	mainFlex.AddItem(searchPanel, 3, 0, false)
-	mainFlex.AddItem(tview.NewTextView().SetText("[yellow]查询结果[white]").SetTextAlign(tview.AlignCenter), 1, 0, false)
-	mainFlex.AddItem(resultTable, 0, 3, true)
-
-	exportCSV := tview.NewButton("[导出CSV]")
-	exportCSV.SetSelectedFunc(func() {
+	// 导出功能
+	exportCSVBtn.SetSelectedFunc(func() {
 		if len(results) == 0 {
-			statusText.SetText("[red]没有可导出的数据[white]")
+			setStatus(statusBar, "错误: 没有可导出的数据")
 			return
 		}
 		err := exportToCSV(results, "quake_results.csv")
 		if err != nil {
-			statusText.SetText(fmt.Sprintf("[red]导出失败: %v[white]", err))
+			setStatus(statusBar, fmt.Sprintf("导出失败: %v", err))
 		} else {
-			statusText.SetText("[green]已导出到 quake_results.csv[white]")
+			setStatus(statusBar, "已导出到: quake_results.csv")
 		}
 	})
-	exportJSON := tview.NewButton("[导出JSON]")
-	exportJSON.SetSelectedFunc(func() {
+
+	exportJSONBtn.SetSelectedFunc(func() {
 		if len(results) == 0 {
-			statusText.SetText("[red]没有可导出的数据[white]")
+			setStatus(statusBar, "错误: 没有可导出的数据")
 			return
 		}
 		err := exportToJSON(results, "quake_results.json")
 		if err != nil {
-			statusText.SetText(fmt.Sprintf("[red]导出失败: %v[white]", err))
+			setStatus(statusBar, fmt.Sprintf("导出失败: %v", err))
 		} else {
-			statusText.SetText("[green]已导出到 quake_results.json[white]")
+			setStatus(statusBar, "已导出到: quake_results.json")
 		}
 	})
-	exportExcel := tview.NewButton("[导出Excel]")
-	exportExcel.SetSelectedFunc(func() {
+
+	exportExcelBtn.SetSelectedFunc(func() {
 		if len(results) == 0 {
-			statusText.SetText("[red]没有可导出的数据[white]")
+			setStatus(statusBar, "错误: 没有可导出的数据")
 			return
 		}
 		err := exportToExcel(results, "quake_results.xlsx")
 		if err != nil {
-			statusText.SetText(fmt.Sprintf("[red]导出失败: %v[white]", err))
+			setStatus(statusBar, fmt.Sprintf("导出失败: %v", err))
 		} else {
-			statusText.SetText("[green]已导出到 quake_results.xlsx[white]")
+			setStatus(statusBar, "已导出到: quake_results.xlsx")
 		}
 	})
 
-	exportPanel := tview.NewFlex()
-	exportPanel.AddItem(exportCSV, 0, 1, false)
-	exportPanel.AddItem(exportJSON, 0, 1, false)
-	exportPanel.AddItem(exportExcel, 0, 1, false)
+	app.SetRoot(mainView, true)
 
-	mainFlex.AddItem(exportPanel, 3, 0, false)
-	mainFlex.AddItem(statusText, 1, 0, false)
-
-	app.SetRoot(mainFlex, true)
+	// 键盘事件
 	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyEsc {
 			app.Stop()
 		}
 		return event
 	})
+
+	setStatus(statusBar, "就绪 - 请选择模式并输入查询语句")
 
 	if err := app.Run(); err != nil {
 		log.Fatal(err)
@@ -257,6 +299,11 @@ func loadConfig() {
 	json.Unmarshal(data, &config)
 }
 
+func setStatus(statusBar *tview.TextView, text string) {
+	statusBar.SetText(" " + text + " ")
+	statusBar.SetTextColor(tcell.ColorWhite)
+}
+
 func exportToCSV(results []AssetRow, filename string) error {
 	file, err := os.Create(filename)
 	if err != nil {
@@ -268,15 +315,11 @@ func exportToCSV(results []AssetRow, filename string) error {
 	defer writer.Flush()
 
 	header := []string{"IP", "端口", "协议", "标题", "国家", "城市", "ASN", "组织"}
-	if err := writer.Write(header); err != nil {
-		return err
-	}
+	writer.Write(header)
 
 	for _, asset := range results {
 		row := []string{asset.IP, asset.Port, asset.Protocol, asset.Title, asset.Country, asset.City, asset.ASN, asset.Org}
-		if err := writer.Write(row); err != nil {
-			return err
-		}
+		writer.Write(row)
 	}
 	return nil
 }
